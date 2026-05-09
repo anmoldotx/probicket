@@ -7,27 +7,26 @@ import type { Config } from '../config/env';
 import { logger } from '../utils/logger';
 
 // ---------------------------------------------------------------------------
-// All queryable attributes + their natural question phrasings (fallback only)
-// Gemini generates the actual question wording — this is used for fallback.
+// Attribute questions — also used as the local phrasing when no Gemini needed
 // ---------------------------------------------------------------------------
 
 const ATTRIBUTE_QUESTIONS: Record<string, string> = {
-  isForeignPlayer: 'Is this player from outside India?',
-  'role:batsman': 'Is this player primarily a batsman?',
-  'role:bowler': 'Is this player primarily a bowler?',
-  'role:allrounder': 'Is this player an all-rounder?',
-  'role:wicketkeeper': 'Is this player a wicket-keeper?',
-  batsRightHanded: 'Does this player bat right-handed?',
-  bowlsFast: 'Does this player bowl fast or medium-fast?',
-  bowlsSpin: 'Does this player bowl spin?',
-  hasWonIPL: 'Has this player won an IPL title?',
-  isCurrentlyCaptain: 'Has this player captained an IPL team recently?',
-  isVeteran: 'Has this player been in IPL since 2012 or earlier?',
-  hasPlayedOver100IPLMatches: 'Has this player played 100 or more IPL matches?',
-  hasPlayedTestCricket: 'Has this player played Test cricket internationally?',
-  hasPlayedWorldCup: 'Has this player appeared in an ICC World Cup?',
-  isWellKnown: 'Is this player a widely recognised cricket star?',
-  hasPlayedForMoreThanOneTeam: 'Has this player played for more than one IPL team?',
+  isForeignPlayer:             'Is this player from outside India?',
+  'role:batsman':              'Is this player primarily a batsman?',
+  'role:bowler':               'Is this player primarily a bowler?',
+  'role:allrounder':           'Is this player an all-rounder?',
+  'role:wicketkeeper':         'Is this player a wicket-keeper?',
+  batsRightHanded:             'Does this player bat right-handed?',
+  bowlsFast:                   'Does this player bowl fast or medium-fast?',
+  bowlsSpin:                   'Does this player bowl spin?',
+  hasWonIPL:                   'Has this player won an IPL title?',
+  isCurrentlyCaptain:          'Has this player captained an IPL team in a recent season?',
+  isVeteran:                   'Has this player been in the IPL since 2012 or earlier?',
+  hasPlayedOver100IPLMatches:  'Has this player played 100 or more IPL matches?',
+  hasPlayedTestCricket:        'Has this player played Test cricket internationally?',
+  hasPlayedWorldCup:           'Has this player appeared in an ICC World Cup?',
+  isWellKnown:                 'Is this player a widely recognised name in IPL?',
+  hasPlayedForMoreThanOneTeam: 'Has this player played for more than one IPL franchise?',
 };
 
 const ALL_ATTRIBUTES = Object.keys(ATTRIBUTE_QUESTIONS);
@@ -49,7 +48,7 @@ const GuessResponseSchema = z.object({
 });
 
 // ---------------------------------------------------------------------------
-// Local attribute resolution — maps attribute key → boolean value on a player
+// Local attribute resolver
 // ---------------------------------------------------------------------------
 
 function getAttributeValue(player: IPLPlayer, attribute: string): boolean {
@@ -75,11 +74,56 @@ function getAttributeValue(player: IPLPlayer, attribute: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Attribute distribution — compact string sent to Gemini instead of player JSON
-// Shows yes-count/total so Gemini can pick the best-splitting attribute.
+// Core: select the best attribute to ask about entirely locally.
+//
+// Rules:
+//   1. Never re-ask an already-asked attribute.
+//   2. Skip attributes that are 0 % or 100 % in the current pool — they carry
+//      zero information and lead to absurd follow-up questions (e.g. asking
+//      "is this player a bowler?" when every remaining candidate is a batsman).
+//   3. Among the rest, pick the attribute whose yes-ratio is closest to 50 %
+//      (maximum information gain / entropy reduction).
+//
+// Returns null only if no useful attribute remains (should not happen in
+// practice with 16 attributes and ≤12 questions).
 // ---------------------------------------------------------------------------
 
-function buildDistribution(candidates: IPLPlayer[], askedAttributes: Set<string>): string {
+function selectBestAttribute(
+  candidates: IPLPlayer[],
+  askedAttributes: Set<string>
+): { attribute: string; yesCount: number; total: number } | null {
+  const total = candidates.length;
+  let best: { attribute: string; yesCount: number; total: number } | null = null;
+  let bestScore = Infinity; // minimise |0.5 - ratio|
+
+  for (const attr of ALL_ATTRIBUTES) {
+    if (askedAttributes.has(attr)) continue;
+
+    const yes = candidates.filter((p) => getAttributeValue(p, attr)).length;
+    const ratio = yes / total;
+
+    // Skip zero-information attributes — already implied by previous answers.
+    if (ratio === 0 || ratio === 1) continue;
+
+    const score = Math.abs(0.5 - ratio);
+    if (score < bestScore) {
+      bestScore = score;
+      best = { attribute: attr, yesCount: yes, total };
+    }
+  }
+
+  return best;
+}
+
+// ---------------------------------------------------------------------------
+// Build compact distribution string for Gemini (small-pool contextual mode).
+// Only includes attributes that carry information (not 0 % or 100 %).
+// ---------------------------------------------------------------------------
+
+function buildUsefulDistribution(
+  candidates: IPLPlayer[],
+  askedAttributes: Set<string>
+): string {
   const total = candidates.length;
   const lines: string[] = [`total_candidates: ${total}`];
 
@@ -87,6 +131,7 @@ function buildDistribution(candidates: IPLPlayer[], askedAttributes: Set<string>
     if (askedAttributes.has(attr)) continue;
     const yes = candidates.filter((p) => getAttributeValue(p, attr)).length;
     const pct = Math.round((yes / total) * 100);
+    if (pct === 0 || pct === 100) continue; // skip zero-information attributes
     lines.push(`${attr}: ${yes}/${total} (${pct}%)`);
   }
 
@@ -94,21 +139,7 @@ function buildDistribution(candidates: IPLPlayer[], askedAttributes: Set<string>
 }
 
 // ---------------------------------------------------------------------------
-// When the pool is small, include player names so Gemini can ask targeted
-// contextual questions (e.g. "Is this player known for the helicopter shot?")
-// rather than generic attribute phrasing.
-// ---------------------------------------------------------------------------
-
-const CONTEXTUAL_THRESHOLD = 15;
-
-function buildCandidateContext(candidates: IPLPlayer[]): string {
-  return candidates
-    .map((p) => `${p.name} (${p.currentTeam}, ${p.role})`)
-    .join(', ');
-}
-
-// ---------------------------------------------------------------------------
-// Local confidence heuristic — no Gemini needed
+// Confidence heuristic — no Gemini needed
 // ---------------------------------------------------------------------------
 
 function estimateConfidence(remaining: number): number {
@@ -117,6 +148,18 @@ function estimateConfidence(remaining: number): number {
   if (remaining <= 4) return 82;
   if (remaining <= 8) return 60;
   return 25;
+}
+
+// ---------------------------------------------------------------------------
+// Pool sizes
+// ---------------------------------------------------------------------------
+
+// Below this threshold we ask Gemini to generate a targeted, player-aware question.
+// Above it we select and phrase the question entirely locally (instant, no API call).
+const CONTEXTUAL_THRESHOLD = 15;
+
+function buildCandidateContext(candidates: IPLPlayer[]): string {
+  return candidates.map((p) => `${p.name} (${p.currentTeam}, ${p.role})`).join(', ');
 }
 
 // ---------------------------------------------------------------------------
@@ -134,46 +177,64 @@ export class GeminiAIService implements IAIService {
     });
   }
 
-  // ── Prompt A: Question generation ──────────────────────────────────────────
-  // Large pool (>15): sends only the distribution table (~150 tokens).
-  // Small pool (≤15): also sends player names so Gemini can ask targeted,
-  //   player-aware questions rather than generic attribute phrasing.
+  // ── Question generation ────────────────────────────────────────────────────
+  //
+  // LARGE POOL (> CONTEXTUAL_THRESHOLD):
+  //   Pick the best attribute locally (pure math, instant, no API call).
+  //   Use the static question phrasing from ATTRIBUTE_QUESTIONS.
+  //   This eliminates hallucinated follow-ups like "Is this player a bowler?"
+  //   after the user already confirmed they are a batsman.
+  //
+  // SMALL POOL (≤ CONTEXTUAL_THRESHOLD):
+  //   Ask Gemini to generate a contextual, player-aware question using the
+  //   actual candidate names — but only from the useful (non-degenerate)
+  //   distribution so Gemini cannot pick a 0 %/100 % attribute.
+  //
   async generateQuestion(
     candidates: IPLPlayer[],
     history: AskedQuestion[]
   ): Promise<QuestionResult> {
     const askedAttributes = new Set(history.map((h) => h.attribute));
-    const distribution = buildDistribution(candidates, askedAttributes);
     const isSmallPool = candidates.length <= CONTEXTUAL_THRESHOLD;
 
-    const contextSection = isSmallPool
-      ? `\nRemaining candidates (use these to ask a precise, player-aware question):\n${buildCandidateContext(candidates)}\n`
-      : '';
+    // ── Fast path: local selection (large pool) ──────────────────────────────
+    if (!isSmallPool) {
+      const best = selectBestAttribute(candidates, askedAttributes);
+      if (best) {
+        logger.debug(
+          { attr: best.attribute, yes: best.yesCount, total: best.total },
+          'Local question selection'
+        );
+        return {
+          question: ATTRIBUTE_QUESTIONS[best.attribute],
+          attribute: best.attribute,
+        };
+      }
+      // Fallback if every attribute is 0 %/100 % (very unusual)
+      return this.fallbackQuestion(askedAttributes);
+    }
 
-    const questionInstruction = isSmallPool
-      ? 'Phrase a targeted yes/no question that would best distinguish between the specific players listed. The question can reference playing style, career moments, or team history — not just the attribute name.'
-      : 'Phrase a natural yes/no question for a general cricket audience.';
-
+    // ── Contextual path: Gemini (small pool) ────────────────────────────────
+    const distribution = buildUsefulDistribution(candidates, askedAttributes);
     const validKeys = ALL_ATTRIBUTES.join(', ');
 
-    const prompt = `You are the question engine for an IPL (Indian Premier League) cricket Akinator game.
-Pick the single best attribute to ask about — the one whose yes% is closest to 50%.
-Do NOT pick any attribute already in the asked list.
-${contextSection}
-Attribute distribution (attribute: yes/total, %yes):
+    const prompt = `You are the question engine for an IPL cricket Akinator game.
+The player pool has narrowed to ${candidates.length} specific players. Ask a targeted question.
+
+Remaining candidates:
+${buildCandidateContext(candidates)}
+
+Attribute distribution — ONLY useful attributes shown (0% and 100% already filtered out):
 ${distribution}
 
 RULES:
-- ALL questions MUST be specifically about the player's IPL career and IPL records — not Test cricket, ODIs, or other leagues.
-- Frame questions in IPL context, e.g. "In the IPL, has this player ever captained a franchise?" not "Has this player been a captain?"
-- The "attribute" field MUST be EXACTLY one of these valid values (copy exactly, no variation):
-  ${validKeys}
-- If you cannot map your question to one of the above attributes, pick the closest matching one from the list.
+- Pick the attribute whose yes% is closest to 50% (maximum information gain).
+- ALL questions MUST reference IPL career specifically — not Test cricket, ODIs, or other leagues.
+- Phrase the question in a way that directly relates to the specific players listed above.
+- The "attribute" field MUST be EXACTLY one of: ${validKeys}
 
-${questionInstruction}
-
-Return JSON only — no markdown, no explanation:
-{"question": "<IPL-specific yes/no question>", "attribute": "<one of the valid attribute names above>"}`;
+Return JSON only:
+{"question": "<targeted yes/no question about IPL>", "attribute": "<exact attribute name>"}`;
 
     try {
       const result = await this.model.generateContent(prompt);
@@ -188,12 +249,15 @@ Return JSON only — no markdown, no explanation:
       logger.error({ err }, 'Gemini generateQuestion failed');
     }
 
+    // Gemini failed — fall back to local selection
+    const best = selectBestAttribute(candidates, askedAttributes);
+    if (best) {
+      return { question: ATTRIBUTE_QUESTIONS[best.attribute], attribute: best.attribute };
+    }
     return this.fallbackQuestion(askedAttributes);
   }
 
   // ── Filtering: pure local logic — zero Gemini tokens ──────────────────────
-  // The question was generated from a known attribute, so we filter deterministically.
-  // "maybe" / "don't_know" → keep all candidates unchanged.
   async filterCandidates(
     candidates: IPLPlayer[],
     _question: string,
@@ -217,19 +281,13 @@ Return JSON only — no markdown, no explanation:
     };
   }
 
-  // ── Prompt B: Final guess ──────────────────────────────────────────────────
-  // Sends only player names + teams + Q&A history (~100-200 tokens total).
+  // ── Final guess ────────────────────────────────────────────────────────────
   async makeGuess(
     candidates: IPLPlayer[],
     history: AskedQuestion[]
   ): Promise<GuessResult> {
-    const candidateList = candidates
-      .map((p) => `${p.name} (${p.currentTeam})`)
-      .join(', ');
-
-    const qa = history
-      .map((h) => `- ${h.question} → ${h.answer}`)
-      .join('\n');
+    const candidateList = candidates.map((p) => `${p.name} (${p.currentTeam})`).join(', ');
+    const qa = history.map((h) => `- ${h.question} → ${h.answer}`).join('\n');
 
     const prompt = `IPL Akinator — make a final guess.
 
@@ -261,16 +319,13 @@ Return JSON only:
     };
   }
 
-  // ── Fallback: pick the available attribute closest to 50/50 locally ────────
+  // ── Fallback ───────────────────────────────────────────────────────────────
   private fallbackQuestion(askedAttributes: Set<string>): QuestionResult {
     for (const attr of ALL_ATTRIBUTES) {
       if (!askedAttributes.has(attr)) {
-        return {
-          question: ATTRIBUTE_QUESTIONS[attr],
-          attribute: attr,
-        };
+        return { question: ATTRIBUTE_QUESTIONS[attr], attribute: attr };
       }
     }
-    return { question: 'Is this player currently active in IPL?', attribute: 'isCurrentlyCaptain' };
+    return { question: 'Has this player captained an IPL team?', attribute: 'isCurrentlyCaptain' };
   }
 }

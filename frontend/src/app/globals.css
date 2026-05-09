@@ -1,0 +1,80 @@
+@import "tailwindcss";
+
+/* ── Design tokens ───────────────────────────────────────────────────────────
+   Using @theme inline so Tailwind generates `bg-green`, `text-text`, etc.
+   as var() references — enabling them to change when `.light` class is applied.
+   ─────────────────────────────────────────────────────────────────────────── */
+@theme inline {
+  /* Colors — resolved via CSS variables below, so they respond to theme toggle */
+  --color-green:         var(--green);
+  --color-green-dim:     var(--green-dim);
+  --color-green-bright:  var(--green-bright);
+  --color-yellow:        var(--yellow);
+  --color-yellow-dim:    var(--yellow-dim);
+  --color-bg:            var(--bg);
+  --color-surface:       var(--surface);
+  --color-border:        var(--border);
+  --color-text:          var(--text);
+  --color-muted:         var(--muted);
+
+  /* Fonts */
+  --font-display: var(--font-space-grotesk), ui-sans-serif, system-ui;
+  --font-body:    var(--font-dm-sans), ui-sans-serif, system-ui;
+}
+
+/* ── Dark mode (default) ──────────────────────────────────────────────────── */
+:root {
+  --green:         oklch(52% 0.17 145);
+  --green-dim:     oklch(38% 0.12 145);
+  --green-bright:  oklch(65% 0.20 145);
+  --yellow:        oklch(80% 0.18 95);
+  --yellow-dim:    oklch(65% 0.14 95);
+  --bg:            oklch(11% 0.01 145);
+  --surface:       oklch(17% 0.015 145);
+  --border:        oklch(28% 0.03 145);
+  --text:          oklch(94% 0.01 145);
+  --muted:         oklch(60% 0.02 145);
+}
+
+/* ── Light mode — `.light` on <html> ─────────────────────────────────────── */
+html.light {
+  --green:         oklch(42% 0.17 145);
+  --green-dim:     oklch(55% 0.14 145);
+  --green-bright:  oklch(38% 0.20 145);
+  --yellow:        oklch(58% 0.16 88);
+  --yellow-dim:    oklch(50% 0.13 88);
+  --bg:            oklch(97% 0.006 145);
+  --surface:       oklch(99% 0.003 145);
+  --border:        oklch(88% 0.018 145);
+  --text:          oklch(14% 0.02 145);
+  --muted:         oklch(48% 0.03 145);
+}
+
+/* ── Base ────────────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html {
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font-body), ui-sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Prevent flash by applying theme before paint */
+  color-scheme: dark;
+}
+
+html.light { color-scheme: light; }
+
+body { min-height: 100dvh; margin: 0; }
+
+/* ── View Transitions ────────────────────────────────────────────────────── */
+::view-transition-old(root) { animation: vt-out 0.2s ease-in forwards; }
+::view-transition-new(root) { animation: vt-in  0.28s ease-out backwards; }
+
+@keyframes vt-out { to   { opacity: 0; transform: translateY(-6px); } }
+@keyframes vt-in  { from { opacity: 0; transform: translateY(6px); } }
+
+/* ── Thin scrollbar ──────────────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
