@@ -116,6 +116,37 @@ function selectBestAttribute(
 }
 
 // ---------------------------------------------------------------------------
+// Derive logically implied attributes from a confirmed answer.
+//
+// The role attributes are MUTUALLY EXCLUSIVE — only one can be true per player.
+// Confirming any one role means all others are immediately resolved.
+// Confirming a bowling style means its counterpart is resolved.
+//
+// These implied attributes are added to `askedAttributes` so they are NEVER
+// asked as follow-up questions, regardless of the current pool distribution.
+// This is the belt-and-suspenders fix on top of the 0%/100% ratio filter.
+// ---------------------------------------------------------------------------
+
+const ROLE_GROUP = ['role:batsman', 'role:bowler', 'role:allrounder', 'role:wicketkeeper'] as const;
+
+function getImpliedAttributes(attribute: string, answer: AnswerValue): string[] {
+  // Only affirmative answers allow safe logical deduction.
+  // A "no" answer to role:batsman still leaves three other possibilities.
+  if (answer !== 'yes') return [];
+
+  // Confirming a role immediately resolves all other roles.
+  if ((ROLE_GROUP as readonly string[]).includes(attribute)) {
+    return ROLE_GROUP.filter((r) => r !== attribute);
+  }
+
+  // Confirming fast bowling means spin is resolved (and vice versa).
+  if (attribute === 'bowlsFast') return ['bowlsSpin'];
+  if (attribute === 'bowlsSpin') return ['bowlsFast'];
+
+  return [];
+}
+
+// ---------------------------------------------------------------------------
 // Build compact distribution string for Gemini (small-pool contextual mode).
 // Only includes attributes that carry information (not 0 % or 100 %).
 // ---------------------------------------------------------------------------
@@ -194,7 +225,15 @@ export class GeminiAIService implements IAIService {
     candidates: IPLPlayer[],
     history: AskedQuestion[]
   ): Promise<QuestionResult> {
+    // Build the resolved-attribute set: explicitly asked + logically implied.
+    // e.g. confirming "role:batsman = yes" immediately resolves
+    // role:bowler, role:allrounder, role:wicketkeeper without ever asking them.
     const askedAttributes = new Set(history.map((h) => h.attribute));
+    for (const item of history) {
+      getImpliedAttributes(item.attribute, item.answer).forEach((a) =>
+        askedAttributes.add(a)
+      );
+    }
     const isSmallPool = candidates.length <= CONTEXTUAL_THRESHOLD;
 
     // ── Fast path: local selection (large pool) ──────────────────────────────

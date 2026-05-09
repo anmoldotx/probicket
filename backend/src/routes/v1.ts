@@ -15,6 +15,20 @@ export function createV1Router(
     res.json({ status: 'ok', playersLoaded: playerCache.count });
   });
 
+  // Warmup endpoint — call this from a cron job (e.g. every 10 min on Render free tier)
+  // to prevent cold starts and ensure the player cache is populated.
+  router.get('/warmup', async (_req, res) => {
+    const before = playerCache.count;
+    await playerCache.getAll();           // forces a cache refresh if stale
+    const after = playerCache.count;
+    res.json({
+      status: 'warm',
+      playersLoaded: after,
+      cacheRefreshed: before === 0 && after > 0,
+      timestamp: new Date().toISOString(),
+    });
+  });
+
   router.post('/game/start', startGameLimiter, gameController.startGame);
 
   router.post(
